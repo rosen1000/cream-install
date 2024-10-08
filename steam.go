@@ -4,21 +4,24 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 
-	vdf2 "github.com/BenLubar/vdf"
-	"github.com/andygrunwald/vdf"
-	"github.com/k0kubun/pp"
-	bvdf "github.com/wakeful-cloud/vdf"
+	"github.com/BenLubar/vdf"
+	"github.com/karrick/godirwalk"
 )
 
 const (
 	STEAM_HOME string = ".steam/steam"
 )
+
+var searchNames = []string{"libsteam_api.so", "libsteam_api.dylib", "steam_api.dll", "steam_api64.dll"}
 
 func GetUsers() {
 	p := path.Join(getHome(), STEAM_HOME, "userdata")
@@ -28,35 +31,21 @@ func GetUsers() {
 	}
 	for _, user := range userIds {
 		id := user.Name()
-		file, err := os.Open(path.Join(getHome(), STEAM_HOME, "userdata", id, "config/localconfig.vdf"))
+		vdf, err := ReadVdfA(path.Join(getHome(), STEAM_HOME, "userdata", id, "config/localconfig.vdf"))
 		if err != nil {
 			panic(err)
 		}
-		parser := vdf.NewParser(file)
-		data, err := parser.Parse()
-		if err != nil {
-			panic(err)
-		}
-		USED(data)
 		// fmt.Println(data["UserLocalConfigStore"].(map[string]interface{})["friends"].(map[string]interface{})["PersonaName"])
+		USED(vdf)
 	}
 }
 
-func ReadShortcuts() (any, error) {
-	file, err := os.Open("/home/hax/.steam/steam/userdata/169122681/config/shortcuts.vdf")
+func ReadShortcuts() (*vdf.Node, error) {
+	vdf, err := ReadVdfB("/home/hax/.steam/steam/userdata/169122681/config/shortcuts.vdf")
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-	m, err := bvdf.ReadVdf(data)
-	if err != nil {
-		return nil, err
-	}
-	pp.Print(m)
-	return nil, nil
+	return vdf, nil
 }
 
 func GetApps() {
@@ -120,22 +109,22 @@ func getLibraries() []Library {
 }
 
 func getAppStates() []AppState {
-	manifests := []string{}
 	libs := getLibraries()
+	var states []AppState
 	for _, lib := range libs {
+		manifests := []string{}
 		manif, err := filepath.Glob(filepath.Join(lib.Path, "steamapps", "appmanifest_*.acf"))
 		if err != nil {
 			panic(manif)
 		}
 		manifests = append(manifests, manif...)
-	}
-	var states []AppState
-	for _, match := range manifests {
-		vdf, err := ReadVdfA(match)
-		if err != nil {
-			panic(err)
+		for _, match := range manifests {
+			vdf, err := ReadVdfA(match)
+			if err != nil {
+				panic(err)
+			}
+			states = append(states, NewAppState(vdf, &lib))
 		}
-		states = append(states, NewAppState(vdf))
 	}
 	return states
 }
@@ -203,7 +192,18 @@ func (f StateFlag) String() string {
 	}
 }
 
+type CrackStatus int
+
+const (
+	Unknown = iota
+	Uncracked
+	Cracked
+)
+
 type AppState struct {
+	FromLibrary *Library
+	CrackStatus
+
 	Appid                           int32
 	Universe                        int32
 	Name                            string
@@ -231,8 +231,9 @@ func (app AppState) Run() error {
 }
 
 // TODO: maybe search them by name? warframe had its name and launcher swapped
-func NewAppState(vdf *vdf2.Node) AppState {
+func NewAppState(vdf *vdf.Node, lib *Library) AppState {
 	state := AppState{}
+	state.FromLibrary = lib
 	node := vdf.FirstChild()
 	state.Appid = node.Int()
 	node = node.NextChild()
@@ -276,22 +277,143 @@ func NewAppState(vdf *vdf2.Node) AppState {
 	return state
 }
 
+// TODO: make some kind of registry in each library dir to cache these things
+func (a *AppState) IsCracked() bool {
+	if a.CrackStatus != Unknown {
+		return a.CrackStatus == Cracked
+	}
+
+	appPath := path.Join(a.FromLibrary.Path, "steamapps/common", a.Installdir)
+	result := false
+	if _, err := os.Stat(appPath); err != nil {
+		return false
+	}
+
+	godirwalk.Walk(appPath, &godirwalk.Options{
+		Callback: func(path string, file *godirwalk.Dirent) error {
+			_, name := filepath.Split(path)
+			if name == "cream_api.ini" {
+				result = true
+				return godirwalk.SkipThis
+			}
+			return nil
+		},
+		Unsorted: true,
+	})
+
+	if result {
+		a.CrackStatus = Cracked
+	} else {
+		a.CrackStatus = Uncracked
+	}
+	return result
+}
+
+func MoveFile(from, to string) {
+	_, err := os.Stat(from)
+	catchErr(err)
+	fromFile, err := os.Open(from)
+	catchErr(err)
+	toFile, err := os.Create(to)
+	catchErr(err)
+	_, err = fromFile.WriteTo(toFile)
+	catchErr(err)
+	catchErr(os.Chmod(to, 0755))
+	catchErr(fromFile.Close())
+	catchErr(os.Remove(from))
+	catchErr(toFile.Close())
+}
+
+func (a *AppState) ApplyCrack() {
+	basePath := path.Join(a.FromLibrary.Path, "steamapps/common", a.Installdir)
+	godirwalk.Walk(basePath, &godirwalk.Options{
+		Callback: func(path string, file *godirwalk.Dirent) error {
+			if slices.Index(searchNames, file.Name()) != -1 {
+				dir, _ := filepath.Split(path)
+				oldNameParts := strings.Split(file.Name(), ".")
+				oldName := fmt.Sprintf("%v_o.%v", oldNameParts[0], oldNameParts[1])
+
+				MoveFile(path, filepath.Join(dir, oldName))
+
+				var fName, iniName string
+				switch file.Name() {
+				// TODO: maybe check if game lib is 32 bits?? what are we the 90's?
+				case "libsteam_api.so":
+					fName = "log_build/linux/x64/libsteam_api.so"
+					iniName = "log_build/linux/x64/cream_api.ini"
+				case "libsteam_api.dylib":
+					fName = "log_build/macos/libsteam_api.so"
+					iniName = "log_build/macos/cream_api.ini"
+				case "steam_api.dll":
+					fName = "log_build/windows/steam_api.dll"
+					iniName = "log_build/windows/cream_api.ini"
+				case "steam_api64.dll":
+					fName = "log_build/windows/steam_api64.dll"
+					iniName = "log_build/windows/cream_api.ini"
+				}
+
+				f, err := cream.ReadFile(fName)
+				catchErr(err)
+				ini, err := cream.ReadFile(iniName)
+				catchErr(err)
+				catchErr(os.WriteFile(path, f, fs.ModeAppend))
+				creamFile, err := os.Create(filepath.Join(dir, "cream_api.ini"))
+				catchErr(err)
+				creamFile.Write(ini)
+				creamFile.Close()
+				a.CrackStatus = Cracked
+			}
+			return nil
+		},
+		Unsorted: true,
+	})
+}
+
+func (a *AppState) RemoveCrack() {
+	basePath := path.Join(a.FromLibrary.Path, "steamapps/common", a.Installdir)
+	godirwalk.Walk(basePath, &godirwalk.Options{
+		Callback: func(path string, file *godirwalk.Dirent) error {
+			if file.Name() == "cream_api.ini" {
+				if err := os.Remove(path); err != nil {
+					panic(err)
+				}
+				return nil
+			}
+
+			if slices.Index(searchNames, file.Name()) != -1 {
+				dir, _ := filepath.Split(path)
+				oldNameParts := strings.Split(file.Name(), ".")
+				oldName := fmt.Sprintf("%v_o.%v", oldNameParts[0], oldNameParts[1])
+				if err := os.Remove(path); err != nil {
+					panic(err)
+				}
+				MoveFile(filepath.Join(dir, oldName), path)
+				a.CrackStatus = Uncracked
+			}
+
+			return nil
+		},
+		Unsorted: true,
+	})
+
+}
+
 type App struct {
 	LastPlayed string
 	Playtime   string
 	Cloud      struct {
 		last_sync_state string
-	} `vdf:"cloud"`
+	}
 	Autocloud struct {
 		lastlaunch string
 		lastexit   string
-	} `vdf:"autocloud"`
+	}
 	BadgeData     string
 	LaunchOptions string
 }
 
 // Read VDF in text format
-func ReadVdfA(path string) (*vdf2.Node, error) {
+func ReadVdfA(path string) (*vdf.Node, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -305,7 +427,7 @@ func ReadVdfA(path string) (*vdf2.Node, error) {
 }
 
 // Read VDF in binary format
-func ReadVdfB(path string) (*vdf2.Node, error) {
+func ReadVdfB(path string) (*vdf.Node, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -318,8 +440,8 @@ func ReadVdfB(path string) (*vdf2.Node, error) {
 	return _readVdf(data, true)
 }
 
-func _readVdf(data []byte, binary bool) (*vdf2.Node, error) {
-	root := &vdf2.Node{}
+func _readVdf(data []byte, binary bool) (*vdf.Node, error) {
+	root := &vdf.Node{}
 	if binary {
 		if err := root.UnmarshalBinary(data); err != nil {
 			return nil, err

@@ -257,6 +257,7 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	crackedText := lipgloss.NewStyle().Foreground(lipgloss.Color("176")).Render("(cracked)")
 	// Rerender main view
 	str := ""
 	if len(m.display) == 0 {
@@ -267,7 +268,11 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if i == m.scroll {
 			cursor = '>'
 		}
-		str += fmt.Sprintf("\000%c %s\n", cursor, game.Name)
+		if i >= m.vp.YOffset && i < m.vp.YOffset+m.vp.Height && game.IsCracked() {
+			str += fmt.Sprintf("\000%c %s %s\n", cursor, game.Name, crackedText)
+		} else {
+			str += fmt.Sprintf("\000%c %s\n", cursor, game.Name)
+		}
 	}
 	m.vp.SetContent(str)
 
@@ -336,14 +341,15 @@ func NewEditModel(game *AppState) EditModel {
 			{"Last Played", time.Unix(int64(game.LastPlayed), 0).Format("15:04:05 02/01/06")},
 			{"Last Updated", time.Unix(int64(game.LastUpdated), 0).Format("15:04:05 02/01/06")},
 			{"State Flags", strconv.Itoa(int(game.StateFlags))},
+			{"Cracked?", fmt.Sprintf("%v", game.IsCracked())},
 		}),
-		table.WithFocused(false),
+		table.WithFocused(true),
 		table.WithHeight(height-3),
 		table.WithWidth(width-4),
 	)
-	st := table.DefaultStyles()
-	st.Selected = st.Cell.UnsetPaddingLeft()
-	tabl.SetStyles(st)
+	// st := table.DefaultStyles()
+	// st.Selected = st.Cell.UnsetPaddingLeft()
+	// tabl.SetStyles(st)
 	return EditModel{vp: vp, game: game, table: tabl}
 }
 
@@ -354,6 +360,15 @@ func (m EditModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
+		case " ":
+			if m.table.Rows()[m.table.Cursor()][0] == "Cracked?" {
+				if m.game.IsCracked() {
+					m.game.RemoveCrack()
+				} else {
+					m.game.ApplyCrack()
+				}
+				m.table.Rows()[m.table.Cursor()][1] = fmt.Sprintf("%v", m.game.IsCracked())
+			}
 		}
 	}
 	m.table, _ = m.table.Update(msg)

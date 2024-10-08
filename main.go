@@ -1,19 +1,21 @@
 package main
 
 import (
+	"embed"
 	"flag"
 	"fmt"
 	"io/fs"
 	"path/filepath"
 	"strings"
 
-	// tea "github.com/charmbracelet/bubbletea"
 	tea "github.com/charmbracelet/bubbletea"
-	// "github.com/k0kubun/pp"
-	// "gopkg.in/ini.v1"
 )
 
-var debug bool
+var (
+	debug bool
+	//go:embed log_build/*
+	cream embed.FS
+)
 
 func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
@@ -49,8 +51,7 @@ loop:
 			}
 		case EditScr:
 			_model, _ := tea.NewProgram(NewEditModel(selectedGame)).Run()
-			_ = _model
-			ClearScreen()
+			USED(_model)
 			screen = BrowseScr
 		case ExitScr:
 			break loop
@@ -89,6 +90,12 @@ func Scan(path string) []string {
 }
 
 func USED(arg any) { _ = arg }
+
+func catchErr(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
 
 // if _, err := tea.NewProgram(initModel()).Run(); err != nil {
 // }
